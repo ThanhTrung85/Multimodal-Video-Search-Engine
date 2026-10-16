@@ -1,0 +1,30 @@
+# Multimodal Video Search Engine – Python dependencies
+#
+# Install with:  pip install -r requirements.txt
+#
+# NOTE: PyTorch + torchvision are installed via conda with CUDA 12.1 support:
+#   conda install pytorch torchvision pytorch-cuda=12.1 -c pytorch -c nvidia
+#
+# NOTE: mkl MUST be pinned to 2024.0.0 via conda to avoid a libtorch_cpu.so
+#       symbol lookup error at runtime:
+#   conda install mkl=2024.0.0 -c conda-forge
+
+# ── Vision & ML ──────────────────────────────
+ultralytics==8.4.178
+lap==0.5.13
+transformers==5.20.0
+opencv-python==5.0.0.93
+
+# ── Data & IO ────────────────────────────────
+numpy==2.2.5
+pillow==12.2.0
+pyyaml==6.0.3
+
+# ── Database ─────────────────────────────────
+psycopg2-binary==2.9.13
+sqlalchemy==2.0.54
+pgvector==0.5.1
+
+# ── API server ───────────────────────────────
+fastapi==0.143.2
+uvicorn[standard]==0.54.0

@@ -1,0 +1,22 @@
+# ──────────────────────────────────────────────
+#  Vision pipeline configuration
+# ──────────────────────────────────────────────
+
+tracker:
+  weights: data/yolov10s.pt
+  # COCO class IDs: person=0, bicycle=1, car=2, motorcycle=3, bus=5, truck=7
+  classes: [0, 1, 2, 3, 5, 7]
+  conf_min: 0.25
+  vid_stride: 1
+  sample_interval_sec: 0.6
+  pad_ratio: 0.1
+  min_box_w: 32
+  min_box_h: 32
+  edge_margin_px: 5
+  blur_var_min: 30.0
+  output_dir: data/crops
+
+embedder:
+  model_name: openai/clip-vit-base-patch32
+  batch_size: 64
+  output_dir: data/embeddings

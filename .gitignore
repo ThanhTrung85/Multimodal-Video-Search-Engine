@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+
+# Environment & secrets
+.env
+*.log
+
+# Data & model weights (large files, not tracked)
+data/
+*.mp4
+*.avi
+*.pt
+*.onnx
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
