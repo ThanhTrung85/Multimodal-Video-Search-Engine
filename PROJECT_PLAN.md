@@ -43,7 +43,7 @@ Multimodal-Video-Search-Engine/
 │   │   └── test_video.mp4       # [DONE] Sample test video
 │   └── crops/                   # [DONE] Generated object crops (id_X_frame_Y.jpg)
 ├── docs/
-│   └── project_setup_phase1.md  # [DONE] Phase 1 documentation
+│   └── phase_1.md  # [DONE] Phase 1 documentation
 ├── notebooks/                   # For Stage 3 FAISS baseline & evaluation metrics
 ├── configs/                     # For configuration files
 ├── src/
