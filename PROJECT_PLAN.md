@@ -60,6 +60,8 @@ Multimodal-Video-Search-Engine/
 ├── .gitignore                   # [DONE] Ignores data/, *.mp4, *.pt, __pycache__, etc.
 ├── Makefile                     # [TODO] Automation commands
 └── README.md                    # [TODO] Final documentation
+└── requirements.txt
+└── run_test_ingest.txt
 
 ### Summary of Existing Code (Phase 1):
 1. **`src/vision/tracker.py`**:
