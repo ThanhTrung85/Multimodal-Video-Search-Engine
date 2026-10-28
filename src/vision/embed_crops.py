@@ -1,10 +1,13 @@
-"""Batch-embed all crops for one or more videos.
+"""Batch-embed all crops for one or more videos and ingest into PostgreSQL.
 
 Reads ``metadata.jsonl`` produced by the tracker, runs CLIP image
-encoding in batches, and persists the result as:
+encoding in batches, persists the result locally as:
 
 - ``data/embeddings/{video_id}.npy``       – float32 (N, D)
 - ``data/embeddings/{video_id}_meta.jsonl`` – matching metadata rows
+
+And automatically ingests the video, tracks, and 512-D crop embeddings
+into the PostgreSQL + pgvector database.
 """
 
 from __future__ import annotations
@@ -14,11 +17,66 @@ import json
 import logging
 from pathlib import Path
 
+import cv2
 import numpy as np
 
+from src.db.ingest import ingest_video_data
 from src.vision.embedder import CLIPEmbedder, load_embedder_config
 
 logger = logging.getLogger(__name__)
+
+
+def _build_video_info(
+    video_id: str,
+    raw_videos_dir: str = "data/raw_videos",
+    records: list[dict] | None = None,
+) -> dict:
+    """Build video metadata dictionary for database ingestion."""
+    video_path = None
+
+    # 1. Check if video_path is already provided in metadata records
+    if records and "video_path" in records[0]:
+        candidate = Path(records[0]["video_path"])
+        if candidate.exists():
+            video_path = candidate
+
+    # 2. Otherwise search in raw_videos_dir by video_id
+    if video_path is None:
+        base_dir = Path(raw_videos_dir)
+        for ext in (".mp4", ".avi", ".mov", ".mkv"):
+            candidate = base_dir / f"{video_id}{ext}"
+            if candidate.exists():
+                video_path = candidate
+                break
+
+    if video_path is None:
+        video_path = Path(raw_videos_dir) / f"{video_id}.mp4"
+
+    fps: float | None = None
+    width: int | None = None
+    height: int | None = None
+    duration_sec: float | None = None
+
+    if video_path.exists():
+        cap = cv2.VideoCapture(str(video_path))
+        if cap.isOpened():
+            fps = float(cap.get(cv2.CAP_PROP_FPS)) or None
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or None
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or None
+            if fps and fps > 0 and frame_count > 0:
+                duration_sec = round(frame_count / fps, 2)
+        cap.release()
+
+    return {
+        "video_id": video_id,
+        "name": video_path.name,
+        "file_path": str(video_path),
+        "fps": fps,
+        "duration_sec": duration_sec,
+        # "width": width,
+        # "height": height,
+    }
 
 
 def embed_video(
@@ -26,9 +84,11 @@ def embed_video(
     embedder: CLIPEmbedder,
     crops_dir: str = "data/crops",
     output_dir: str = "data/embeddings",
+    raw_videos_dir: str = "data/raw_videos",
     batch_size: int = 64,
+    ingest_db: bool = True,
 ) -> None:
-    """Embed all crops for a single video and write .npy + _meta.jsonl."""
+    """Embed all crops for a single video, write .npy + _meta.jsonl, and ingest into DB."""
     meta_path = Path(crops_dir) / video_id / "metadata.jsonl"
     if not meta_path.exists():
         logger.error("metadata.jsonl not found: %s", meta_path)
@@ -67,7 +127,7 @@ def embed_video(
     if skipped:
         logger.warning("Skipped %d crops that failed to load", skipped)
 
-    # ── Persist ──────────────────────────────────────────────────────────
+    # ── Persist locally (.npy + _meta.jsonl) ─────────────────────────────
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -86,6 +146,31 @@ def embed_video(
         embeddings.shape[0], npy_path, meta_out_path,
     )
 
+    # ── Ingest into PostgreSQL (pgvector) ────────────────────────────────
+    if ingest_db:
+        logger.info("Ingesting %d embedded crops for video '%s' into PostgreSQL …", len(valid_records), video_id)
+        video_info = _build_video_info(
+            video_id=video_id,
+            raw_videos_dir=raw_videos_dir,
+            records=valid_records,
+        )
+
+        crops_data: list[dict] = []
+        for rec, emb in zip(valid_records, embeddings):
+            crop_item = dict(rec)
+            # Ensure bbox_xyxy key exists regardless of whether tracker saved 'bbox' or 'bbox_xyxy'
+            if "bbox_xyxy" not in crop_item and "bbox" in crop_item:
+                crop_item["bbox_xyxy"] = crop_item["bbox"]
+            crop_item["embedding"] = emb.tolist()
+            crops_data.append(crop_item)
+
+        try:
+            ingest_video_data(video_info=video_info, crops_data=crops_data)
+            logger.info("Database ingestion completed for video '%s'.", video_id)
+        except Exception as exc:
+            logger.error("Failed to ingest video '%s' into PostgreSQL: %s", video_id, exc)
+            raise
+
 
 def _discover_video_ids(crops_dir: str = "data/crops") -> list[str]:
     """Return video IDs by listing subdirectories that contain metadata.jsonl."""
@@ -101,11 +186,12 @@ def _discover_video_ids(crops_dir: str = "data/crops") -> list[str]:
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Batch-embed crops and save .npy + metadata.")
+    p = argparse.ArgumentParser(description="Batch-embed crops, save .npy + metadata, and ingest into DB.")
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--video-id", help="Embed crops for a single video ID.")
     group.add_argument("--all", action="store_true", help="Embed crops for all discovered videos.")
     p.add_argument("--config", default="configs/vision.yaml", help="Path to vision.yaml.")
+    p.add_argument("--no-db", action="store_true", help="Skip PostgreSQL ingestion and only write local files.")
     return p.parse_args()
 
 
@@ -131,7 +217,9 @@ def main() -> None:
             embedder=embedder,
             crops_dir=cfg.get("crops_dir", "data/crops"),
             output_dir=cfg["output_dir"],
+            raw_videos_dir=cfg.get("raw_videos_dir", "data/raw_videos"),
             batch_size=cfg["batch_size"],
+            ingest_db=not args.no_db,
         )
 
 
