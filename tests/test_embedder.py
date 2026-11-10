@@ -37,7 +37,7 @@ def sample_images(tmp_path: Path) -> list[Path]:
 
 
 # ── Tests ────────────────────────────────────────────────────────────────────
-
+@pytest.mark.slow
 class TestEmbedImages:
     def test_output_shape(self, embedder: CLIPEmbedder, sample_images: list[Path]) -> None:
         result = embedder.embed_images(sample_images)
@@ -72,7 +72,7 @@ class TestEmbedImages:
         result = embedder.embed_images([])
         assert result.shape == (0, embedder.dim)
 
-
+@pytest.mark.slow
 class TestEmbedText:
     def test_single_string_shape(self, embedder: CLIPEmbedder) -> None:
         result = embedder.embed_text("a photo of a person")
@@ -97,7 +97,7 @@ class TestEmbedText:
         norm = float(np.linalg.norm(result))
         assert abs(norm - 1.0) < 1e-5
 
-
+@pytest.mark.slow
 class TestDimAttribute:
     def test_dim_is_512(self, embedder: CLIPEmbedder) -> None:
         assert embedder.dim == 512
