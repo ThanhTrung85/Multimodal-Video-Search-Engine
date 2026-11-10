@@ -1,133 +1,258 @@
-# PROJECT CONTEXT & MASTER EXECUTION PLAN: Multimodal Video Search Engine
+# Project plan: Multimodal Video Search Engine
 
-> **Instructions for AI Coding Assistant:**
-> You are acting as a Senior AI & MLOps Engineer Pair-Programmer. Read this entire document carefully before proposing or writing any code. It contains the exact system environment, current repository state, completed modules, and the step-by-step roadmap we are following. Always build incrementally, write modular production-grade code with type hints, and provide verification commands after each step.
+## 1. Objective
 
----
+This repository implements a multimodal video search pipeline that:
 
-## 1. Project Overview & Core Objective
+1. tracks objects in raw videos,
+2. saves quality-filtered crops with per-frame metadata,
+3. embeds crops and text via CLIP,
+4. stores embeddings and metadata for retrieval,
+5. exposes a lightweight search workflow for later API/UI integration.
 
-We are building an **End-to-End Multimodal Video Search Engine (Video RAG)** for a Computer Vision / AI Engineer portfolio.
-- **Goal:** Allow users to search for specific objects, people, vehicles, or moments inside surveillance/traffic videos using natural language queries (e.g., *"person wearing a red jacket carrying a backpack"* or *"white SUV turning left"*).
-- **Core Architecture:**
-  1. **Ingestion Pipeline (Offline / Background):** Decode raw video (OpenCV) -> Detect & Track objects (YOLOv10s + ByteTrack) -> Smart Crop & Quality Filter -> Extract normalized 512-D visual embeddings (CLIP) -> Store metadata & vectors in PostgreSQL (pgvector with HNSW index).
-  2. **Retrieval Pipeline (Online / Real-time):** User inputs text query -> Encode text into 512-D vector (CLIP Text Encoder) -> Cosine similarity search (pgvector k-NN grouped by track_id) + Metadata filtering -> Serve JSON results, cropped thumbnails, and video streams (with HTTP 206 Range Requests) via FastAPI -> Render interactive Web UI with timestamp seeking and bounding box overlay.
-
----
-
-## 2. System Environment & Infrastructure (ALREADY CONFIGURED)
-
-Do NOT ask the user to reinstall these unless adding a strictly necessary new dependency:
-- **OS:** Ubuntu Linux
-- **Project Root:** `/media/thanh-trung/DATA/Project/Multimodal-Video-Search-Engine`
-- **Conda Environment:** `video_rag` (`Python 3.10.12`)
-  - Installed packages: `torch`, `torchvision` (CUDA 12.1), `mkl=2024.0.0` (fixed libtorch_cpu.so symbol issue), `ultralytics`, `lap==0.5.13`, `transformers`, `opencv-python`, `fastapi`, `uvicorn[standard]`, `psycopg2-binary`, `sqlalchemy`, `pgvector`.
-- **Database Container (Running via Docker Compose):**
-  - Image: `ankane/pgvector:latest`
-  - Container Name: `video_rag_db`
-  - Host/Port: `localhost:5432`
-  - Credentials: `POSTGRES_USER=root`, `POSTGRES_PASSWORD=password123`, `POSTGRES_DB=videorag`
-  - Connection URI: `postgresql+psycopg2://root:password123@localhost:5432/videorag`
+The current codebase is the active implementation and is more advanced than the original Phase 1 notes.
 
 ---
 
-## 3. Current Repository Structure & Completed Work (Phase 1 - DONE)
+## 2. Runtime environment
 
-[Folder Structure]
-Multimodal-Video-Search-Engine/
-├── docker/
-│   └── docker-compose.yml       # [DONE] PostgreSQL + pgvector container config
-├── data/                        # [GIT IGNORED]
-│   ├── yolov10s.pt              # [DONE] Pre-downloaded YOLOv10s weights
-│   ├── raw_videos/
-│   │   └── test_video.mp4       # [DONE] Sample test video
-│   └── crops/                   # [DONE] Generated object crops (id_X_frame_Y.jpg)
-├── docs/
-│   └── phase_1.md  # [DONE] Phase 1 documentation
-├── notebooks/                   # For Stage 3 FAISS baseline & evaluation metrics
-├── configs/                     # For configuration files
-├── src/
-│   ├── __init__.py
-│   ├── vision/
-│   │   ├── __init__.py
-│   │   ├── tracker.py           # [DONE - Basic v1] YOLOv10s + ByteTrack + Smart Cropping
-│   │   └── embedder.py          # [DONE - Basic v1] CLIPEmbedder (image & text 512-D L2-norm)
-│   ├── db/
-│   │   └── __init__.py          # [TODO - Stage 4] Database models, connection, ingestion, search
-│   ├── api/
-│   │   └── __init__.py          # [TODO - Stage 5] FastAPI endpoints & video streaming
-│   └── utils/                   # [TODO] Helper utilities (config, logging, image quality)
-├── .gitignore                   # [DONE] Ignores data/, *.mp4, *.pt, __pycache__, etc.
-├── Makefile                     # [TODO] Automation commands
-└── README.md                    # [TODO] Final documentation
-└── requirements.txt
-└── run_test_ingest.txt
+- OS: Linux
+- Python: 3.10 in the `video_rag` conda environment
+- Database image: `pgvector/pgvector:0.8.0-pg17-bookworm`
+- Database credentials are read from `docker/.env`; values are not committed to source control
+- Example connection URI format:
+  `postgresql+psycopg2://<user>:<password>@localhost:5432/videorag`
 
-### Summary of Existing Code (Phase 1):
-1. **`src/vision/tracker.py`**:
-   - Loads `data/yolov10s.pt` via `ultralytics.YOLO`.
-   - Reads `data/raw_videos/test_video.mp4` using `cv2.VideoCapture`.
-   - Runs `model.track(frame, persist=True, classes=[0, 2], tracker="bytetrack.yaml", verbose=False)`.
-   - Uses `sample_rate=15` per `track_id` to crop bounding boxes and save `.jpg` files to `data/crops/id_{track_id}_frame_{frame_idx}.jpg`.
-   - *Verified working:* Successfully tracked objects and saved cropped images to `data/crops/`.
-2. **`src/vision/embedder.py`**:
-   - Defines class `CLIPEmbedder(model_name="openai/clip-vit-base-patch32")`.
-   - Automatically selects `"cuda"` or `"cpu"`.
-   - Implements `embed_image(image_path) -> list[float]` and `embed_text(text) -> list[float]` with L2 normalization, returning a 512-dimensional float list.
+The current project uses a local Docker Postgres + pgvector instance defined in `docker/docker-compose.yml`.
 
 ---
 
-## 4. Master Roadmap: What Needs to Be Built Next
+## 3. Repository state
 
-We will execute the remaining stages sequentially. **Wait for the user's confirmation after completing each stage before moving to the next.**
+### Current implementation
 
-### Stage 2 (Refinement): Enhanced Tracking, Quality Filtering & Metadata Export
-Upgrade `src/vision/tracker.py` from a simple image saver to a structured metadata & quality-aware pipeline:
-- **BBox Padding:** Add configurable padding (e.g., 10-15% context around the bounding box) before cropping so CLIP captures surrounding context.
-- **Quality Filtering:**
-  - Filter out tiny boxes (e.g., width < 32 or height < 32) and low confidence detections.
-  - Compute blur score using Laplacian variance to discard severely motion-blurred crops.
-  - Select top-N sharpest crops per track_id.
-- **Structured Metadata Output:** Return/export structured metadata (`video_id`, `track_id`, `class_name`, `frame_idx`, `timestamp_sec`, `bbox_xyxy`, `crop_path`) so downstream stages can ingest it cleanly.
+- `src/vision/tracker.py`
+  - object tracking via Ultralytics YOLO
+  - configurable sampling interval and stride
+  - bounding-box padding
+  - minimum size, edge, and blur filtering
+  - metadata export as `metadata.jsonl`
+  - per-track crop saving to `data/crops/<video_id>/<track_id>/fNNNNNN.jpg`
 
-### Stage 3: Embedding Baseline & Quantitative Evaluation (Recall@K)
-Before touching PostgreSQL, establish an evaluation benchmark:
-- **Batch Embedding:** Add batch inference (`embed_images_batch`) to `CLIPEmbedder`.
-- **Baseline Search Script:** Encode crops, perform exact cosine search via numpy/faiss, and group results by `track_id`. Compute Recall@K metrics.
+- `src/vision/embedder.py`
+  - `CLIPEmbedder` class for image and text embedding
+  - methods:
+    - `embed_images(paths, batch_size=64)`
+    - `embed_images_with_indices(paths, batch_size=64)`
+    - `embed_text(text)`
+  - L2-normalized embeddings
+  - square-padding preprocessing to protect the crop from center crop loss
 
-### Stage 4: PostgreSQL + pgvector Storage & Ingestion Pipeline
-Build the production storage layer inside `src/db/`:
-- **`src/db/database.py`:** SQLAlchemy engine, session, and `pgvector` initialization (`CREATE EXTENSION IF NOT EXISTS vector`).
-- **`src/db/models.py`:** Define 3 normalized ORM tables: `videos`, `tracks`, and `crops` (with `VECTOR(512)` column and HNSW index).
-- **`src/db/ingest.py`:** End-to-end ingestion script: `tracker.py` -> `embedder.py` -> bulk insert into PostgreSQL.
-- **`src/db/search.py`:** Query function performing Cosine Similarity search (`1 - (embedding <=> query_vec)`).
+- `src/utils/config.py`
+  - shared config loader
+  - crop path resolution relative to the crop root
 
-### Stage 5: FastAPI Backend & Video Streaming Server
-Build the REST API inside `src/api/`:
-- **`src/api/main.py`:**
-  - `POST /api/search`: Accepts text query, runs CLIP text encoder, searches DB, returns JSON.
-  - `GET /api/videos/{video_id}/stream`: Implements HTTP 206 Partial Content (Range Requests) for smooth video seeking in UI.
+- `configs/vision.yaml`
+  - tracker + embedder configuration with defaults for `classes`, `sample_interval_sec`, `blur_var_min`, `output_dir`, and model settings
 
-### Stage 6: Interactive Web Frontend
-- Search bar for queries.
-- Results grid displaying thumbnails.
-- Interactive Video Player modal: Click a result -> play video sought to target timestamp with bounding box overlay.
+- `requirements.txt`
+  - active Python dependencies for vision, CLIP, DB, and API layers
 
-### Stage 8: Packaging, Dockerization & Portfolio Polish
-- Write a clean `Makefile`.
-- Write a slim production `Dockerfile` (using pip).
-- Write an executive-grade `README.md` with Demo GIF and Benchmark Tables.
+- `tests/`
+  - fast tests for tracker, filters, pad-to-square, and embedder behavior
+  - slow tests are controlled via the pytest marker
 
 ---
 
-## 5. Coding Rules & Collaboration Protocol for AI Assistant
+## 4. Tracking pipeline details
 
-1. **Step-by-Step Execution:** Never dump code for multiple stages at once. Focus only on the specific stage or task the user asks for.
-2. **Code Quality:**
-   - Write clean, modular Python 3.10+ code with type annotations (`typing`).
-   - Use a central config module (`src/utils/config.py`) instead of hardcoding paths and DB credentials.
-   - Ensure proper resource cleanup (DB sessions, file handles).
-3. **Hardware Awareness:** Keep batch sizes reasonable for local GPU setup and wrap PyTorch inference in `with torch.no_grad():`.
-4. **Actionable Output:** Every time you write or modify a file, tell the user:
-   - Which file(s) were created/updated.
-   - The exact terminal command to test/verify the change inside the `video_rag` conda environment.
+### Supported classes
+
+The tracker is configured for the following COCO IDs:
+
+- `0` person
+- `1` bicycle
+- `2` car
+- `3` motorcycle
+- `5` bus
+- `7` truck
+
+### Sampling behavior
+
+Current tracker defaults:
+
+- `vid_stride: 1`
+- `sample_interval_sec: 0.6`
+- `conf_min: 0.25`
+- `pad_ratio: 0.1`
+- `min_box_w: 32`
+- `min_box_h: 32`
+- `edge_margin_px: 5`
+- `blur_var_min: 30.0`
+- `blur_eval_size: 128`
+
+### Crop structure
+
+Crops are stored as:
+
+- `data/crops/<video_id>/<track_id>/f000123.jpg`
+
+This is the live structure used by the pipeline; file names are not the legacy prototype format.
+
+### Metadata schema
+
+Each saved crop record includes at least:
+
+- `video_id`
+- `track_id`
+- `frame_idx`
+- `timestamp_sec`
+- `class_id`
+- `class_name`
+- `conf`
+- `bbox_xyxy`
+- `frame_w`
+- `frame_h`
+- `fps`
+- `blur_score`
+- `crop_path` (relative to the crop root)
+
+Example:
+
+- `"crop_path": "vid1/12/f000123.jpg"`
+
+---
+
+## 5. Embedding API and config
+
+The current embedder layer exposes the following API:
+
+- `embed_images(paths, batch_size=64)`
+- `embed_images_with_indices(paths, batch_size=64)`
+- `embed_text(text)`
+
+The config file for the current pipeline is:
+
+- `configs/vision.yaml`
+
+This file contains both tracker and embedder sections, including:
+
+- `tracker.weights`
+- `tracker.classes`
+- `tracker.sample_interval_sec`
+- `tracker.blur_var_min`
+- `tracker.output_dir`
+- `embedder.model_name`
+- `embedder.batch_size`
+- `embedder.output_dir`
+
+---
+
+## 6. Test and tooling status
+
+### Fast tests
+
+Fast validation is run by default:
+
+- `pytest -q`
+- `pytest.ini` contains the default filter: `-m "not slow"`
+
+### Slow tests
+
+Heavy or model-backed checks are marked with:
+
+- `@pytest.mark.slow`
+
+These tests are intentionally excluded from the default suite and should be run separately when needed.
+
+### Requirements
+
+The active dependency set is defined in `requirements.txt` and includes:
+
+- `ultralytics`
+- `lap`
+- `transformers`
+- `opencv-python`
+- `numpy`
+- `pillow`
+- `pyyaml`
+- `psycopg2-binary`
+- `sqlalchemy`
+- `pgvector`
+- `fastapi`
+- `uvicorn`
+
+The runtime also expects the conda pin:
+
+- `mkl=2024.0.0`
+
+---
+
+## 7. Stage roadmap
+
+### Stage 2 — DONE
+
+Completed items:
+
+- padding-aware crop extraction
+- per-track sampling logic
+- edge filtering
+- size filtering
+- blur filtering with normalized scoring
+- metadata export with `blur_score` and relative `crop_path`
+- per-video stats output in `stats.json`
+
+### Stage 3 — DONE for batch embedding; TODO for FAISS and evaluation
+
+Completed:
+
+- CLIP batch embedding via `embed_images` and `embed_images_with_indices`
+- output to `.npy` + `_meta.jsonl`
+- support for text embedding and retrieval preparation
+
+Remaining TODO:
+
+- FAISS baseline setup
+- query-set generation
+- Recall@K evaluation
+- benchmark/reporting pipeline
+
+Low-priority TODO:
+
+- choose the top-N sharpest crops for each track when a track has multiple valid detections
+
+### Stage 4+
+
+Planned next areas:
+
+- PostgreSQL + pgvector ingestion
+- search API and metadata retrieval
+- FastAPI service
+- UI integration and polished project docs
+
+---
+
+## 8. Documentation cleanup notes
+
+The historical references that are no longer correct should not be treated as the source of truth. In particular:
+
+- the early prototype wording should not be used for the current system
+- legacy sampling settings from the original prototype are historical only
+- legacy class filters from the first prototype are not the current defaults
+- legacy crop naming from the first prototype is no longer used
+- old pgvector image references are superseded by the active `pgvector/pgvector:0.8.0-pg17-bookworm` image
+- the current archive note is kept in `pipeline/phase_1.md`, not in the main project plan
+
+---
+
+## 9. Active reference files
+
+- `pipeline/phase_1.md` — historical archive note for original Phase 1 work
+- `configs/vision.yaml` — current runtime configuration
+- `src/vision/tracker.py` — active tracking pipeline
+- `src/vision/embedder.py` — current CLIP embedder API
+- `src/utils/config.py` — config and path helpers
+- `requirements.txt` — current dependency set
+- `pytest.ini` — default test selection rules
+
+This document reflects the repository as it exists now, not the original prototype notes.
