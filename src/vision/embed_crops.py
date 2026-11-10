@@ -21,7 +21,9 @@ import cv2
 import numpy as np
 
 from src.db.ingest import ingest_video_data
+from src.utils.config import resolve_crop_path
 from src.vision.embedder import CLIPEmbedder, load_embedder_config
+from src.vision.tracker import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -106,22 +108,20 @@ def embed_video(
         logger.warning("No records in %s – nothing to embed", meta_path)
         return
 
-    crop_paths = [r["crop_path"] for r in records]
+    crop_root = Path(crops_dir)
+    crop_paths = [str(resolve_crop_path(crop_root, r["crop_path"])) for r in records]
     logger.info("Embedding %d crops for video '%s' …", len(crop_paths), video_id)
 
     # ── Embed ────────────────────────────────────────────────────────────
-    embeddings = embedder.embed_images(crop_paths, batch_size=batch_size)
-    valid_idx = embedder._last_valid_indices
+    embeddings, valid_idx = embedder.embed_images_with_indices(crop_paths, batch_size=batch_size)
 
     # Keep only records whose images loaded successfully
     valid_records = [records[i] for i in valid_idx]
 
     if embeddings.shape[0] != len(valid_records):
-        logger.error(
-            "Mismatch: %d embeddings vs %d valid records",
-            embeddings.shape[0], len(valid_records),
+        raise RuntimeError(
+            f"Mismatch: {embeddings.shape[0]} embeddings vs {len(valid_records)} valid records"
         )
-        return
 
     skipped = len(records) - len(valid_records)
     if skipped:
@@ -199,28 +199,38 @@ def main() -> None:
     args = _parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
 
+    tracker_cfg = load_config(args.config)
     cfg = load_embedder_config(args.config)
     embedder = CLIPEmbedder(config_path=args.config)
+    crops_dir = tracker_cfg["output_dir"]
 
     if args.all:
-        video_ids = _discover_video_ids(cfg.get("crops_dir", "data/crops"))
+        video_ids = _discover_video_ids(crops_dir)
         if not video_ids:
-            logger.warning("No videos with metadata.jsonl found in data/crops/")
+            logger.warning("No videos with metadata.jsonl found in %s", crops_dir)
             return
         logger.info("Discovered %d video(s): %s", len(video_ids), video_ids)
     else:
         video_ids = [args.video_id]
 
+    had_error = False
     for vid in video_ids:
-        embed_video(
-            video_id=vid,
-            embedder=embedder,
-            crops_dir=cfg.get("crops_dir", "data/crops"),
-            output_dir=cfg["output_dir"],
-            raw_videos_dir=cfg.get("raw_videos_dir", "data/raw_videos"),
-            batch_size=cfg["batch_size"],
-            ingest_db=not args.no_db,
-        )
+        try:
+            embed_video(
+                video_id=vid,
+                embedder=embedder,
+                crops_dir=crops_dir,
+                output_dir=cfg["output_dir"],
+                raw_videos_dir=cfg.get("raw_videos_dir", "data/raw_videos"),
+                batch_size=cfg["batch_size"],
+                ingest_db=not args.no_db,
+            )
+        except Exception as exc:
+            logger.exception("Failed to process video '%s': %s", vid, exc)
+            had_error = True
+
+    if had_error:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

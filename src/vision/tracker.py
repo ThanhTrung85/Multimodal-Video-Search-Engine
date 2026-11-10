@@ -15,8 +15,9 @@ from typing import Any
 
 import cv2
 import numpy as np
-import yaml
 from ultralytics import YOLO
+
+from src.utils.config import load_section
 
 logger = logging.getLogger(__name__)
 
@@ -39,13 +40,7 @@ _TRACKER_DEFAULTS: dict[str, Any] = {
 
 def load_config(config_path: str | Path | None = None) -> dict[str, Any]:
     """Load tracker config from YAML, falling back to built-in defaults."""
-    cfg = dict(_TRACKER_DEFAULTS)
-    if config_path is not None:
-        with open(config_path) as f:
-            file_cfg = yaml.safe_load(f) or {}
-        tracker_cfg = file_cfg.get("tracker", {})
-        cfg.update(tracker_cfg)
-    return cfg
+    return load_section(config_path, "tracker", _TRACKER_DEFAULTS)
 
 
 # ── Quality-filter helpers ───────────────────────────────────────────────────
@@ -196,7 +191,7 @@ class VideoTracker:
                 crop_abs = track_dir / crop_fname
                 cv2.imwrite(str(crop_abs), crop_img)
 
-                crop_rel = str(Path(self.cfg["output_dir"]) / video_id / str(track_id) / crop_fname)
+                crop_rel = str(Path(video_id) / str(track_id) / crop_fname)
 
                 record: dict[str, Any] = {
                     "video_id": video_id,

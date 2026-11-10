@@ -13,9 +13,10 @@ from typing import Any
 import cv2
 import numpy as np
 import torch
-import yaml
 from PIL import Image
 from transformers import CLIPModel, CLIPProcessor
+
+from src.utils.config import load_section
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +29,7 @@ _EMBEDDER_DEFAULTS: dict[str, Any] = {
 
 def load_embedder_config(config_path: str | Path | None = None) -> dict[str, Any]:
     """Load embedder section from vision.yaml, with built-in defaults."""
-    cfg = dict(_EMBEDDER_DEFAULTS)
-    if config_path is not None:
-        with open(config_path) as f:
-            file_cfg = yaml.safe_load(f) or {}
-        cfg.update(file_cfg.get("embedder", {}))
-    return cfg
+    return load_section(config_path, "embedder", _EMBEDDER_DEFAULTS)
 
 
 # ── Preprocessing ────────────────────────────────────────────────────────────
@@ -103,48 +99,41 @@ class CLIPEmbedder:
 
     # ── Image embedding ──────────────────────────────────────────────────
 
-    def embed_images(
+    def embed_images_with_indices(
         self,
         paths: list[str | Path],
         batch_size: int = 64,
-    ) -> np.ndarray:
-        """Embed a list of image paths.
+    ) -> tuple[np.ndarray, list[int]]:
+        """Embed image paths batch-by-batch and return ``(embeddings, valid_indices)``.
 
-        Returns
-        -------
-        np.ndarray
-            Float32 array of shape ``(N, dim)`` with L2-normalised rows.
-            *N* equals the number of **successfully loaded** images.
-            Paths that fail to load are logged and skipped.
+        Invalid images are skipped and logged. ``valid_indices`` are the original
+        positions in ``paths`` whose images were successfully embedded.
         """
-        # ── Load & preprocess ────────────────────────────────────────────
-        pil_images: list[Image.Image] = []
         valid_indices: list[int] = []
+        batch_embeds: list[np.ndarray] = []
 
-        for idx, p in enumerate(paths):
-            try:
-                img_bgr = cv2.imread(str(p))
-                if img_bgr is None:
-                    raise ValueError("cv2.imread returned None")
-                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-                img_sq = pad_to_square(img_rgb)
-                pil_images.append(Image.fromarray(img_sq))
-                valid_indices.append(idx)
-            except Exception:
-                logger.warning("Failed to load image, skipping: %s", p)
+        for start in range(0, len(paths), batch_size):
+            batch_paths = paths[start : start + batch_size]
+            batch_images: list[Image.Image] = []
+            batch_valid_indices: list[int] = []
 
-        if not pil_images:
-            return np.empty((0, self.dim), dtype=np.float32)
+            for offset, p in enumerate(batch_paths):
+                original_idx = start + offset
+                try:
+                    img_bgr = cv2.imread(str(p))
+                    if img_bgr is None:
+                        raise ValueError("cv2.imread returned None")
+                    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                    img_sq = pad_to_square(img_rgb)
+                    batch_images.append(Image.fromarray(img_sq))
+                    batch_valid_indices.append(original_idx)
+                except Exception:
+                    logger.warning("Failed to load image, skipping: %s", p)
 
-        # Store for callers that need to know which inputs survived.
-        self._last_valid_indices = valid_indices
+            if not batch_images:
+                continue
 
-        # ── Batch inference ──────────────────────────────────────────────
-        all_emb: list[np.ndarray] = []
-
-        for start in range(0, len(pil_images), batch_size):
-            batch = pil_images[start : start + batch_size]
-            inputs = self.processor(images=batch, return_tensors="pt").to(self.device)
+            inputs = self.processor(images=batch_images, return_tensors="pt").to(self.device)
 
             with torch.inference_mode():
                 if self.device == "cuda":
@@ -153,15 +142,29 @@ class CLIPEmbedder:
                 else:
                     out = self.model.get_image_features(**inputs)
 
-            # transformers ≥5.x returns BaseModelOutputWithPooling
             feats = out.pooler_output if hasattr(out, "pooler_output") else out
-
-            # L2 normalise in float32
             feats = feats.float()
             feats = feats / feats.norm(dim=-1, keepdim=True)
-            all_emb.append(feats.cpu().numpy())
+            batch_embeds.append(feats.cpu().numpy().astype(np.float32))
+            valid_indices.extend(batch_valid_indices)
 
-        return np.concatenate(all_emb, axis=0).astype(np.float32)
+        if not batch_embeds:
+            return np.empty((0, self.dim), dtype=np.float32), []
+
+        return np.concatenate(batch_embeds, axis=0).astype(np.float32), valid_indices
+
+    def embed_images(
+        self,
+        paths: list[str | Path],
+        batch_size: int = 64,
+    ) -> np.ndarray:
+        """Embed image paths and return only the embedding matrix.
+
+        Invalid images are skipped. Use ``embed_images_with_indices`` when the caller
+        needs to map embeddings back to their original positions in ``paths``.
+        """
+        embeddings, _ = self.embed_images_with_indices(paths, batch_size=batch_size)
+        return embeddings
 
     def embed_image(self, path: str | Path) -> list[float]:
         """Embed a single image.  Convenience wrapper around :meth:`embed_images`."""

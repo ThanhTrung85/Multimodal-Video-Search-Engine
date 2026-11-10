@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 import torch
 
+from src.utils.config import load_section, resolve_crop_path
 from src.vision.tracker import VideoTracker, _TRACKER_DEFAULTS
 
 
@@ -35,6 +36,22 @@ def _make_boxes(
 
 def _make_result(boxes: SimpleNamespace) -> list[SimpleNamespace]:
     return [SimpleNamespace(boxes=boxes)]
+
+
+class TestConfigHelpers:
+    def test_load_section_uses_defaults_when_missing_file(self) -> None:
+        cfg = load_section("missing.yaml", "tracker", _TRACKER_DEFAULTS)
+        assert cfg["output_dir"] == _TRACKER_DEFAULTS["output_dir"]
+
+    def test_resolve_crop_path_joins_relative_to_root(self) -> None:
+        root = Path("data/crops")
+        relative = "vid1/3/f000123.jpg"
+        assert resolve_crop_path(root, relative) == root / relative
+
+    def test_resolve_crop_path_preserves_absolute_path(self) -> None:
+        root = Path("data/crops")
+        absolute = Path("/tmp/f000123.jpg")
+        assert resolve_crop_path(root, absolute) == absolute
 
 
 class TestSamplingInterval:
