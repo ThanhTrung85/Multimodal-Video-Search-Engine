@@ -14,6 +14,9 @@ tracker:
   min_box_h: 32
   edge_margin_px: 5
   blur_var_min: 30.0
+  # Blur is evaluated on a normalized square crop to keep thresholds stable across different box sizes.
+  # TODO: re-tune after switching to normalized blur scoring and before production benchmarking.
+  blur_eval_size: 128
   output_dir: data/crops
 
 embedder:

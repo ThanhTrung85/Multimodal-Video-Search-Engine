@@ -34,6 +34,7 @@ _TRACKER_DEFAULTS: dict[str, Any] = {
     "min_box_h": 32,
     "edge_margin_px": 5,
     "blur_var_min": 30.0,
+    "blur_eval_size": 128,
     "output_dir": "data/crops",
 }
 
@@ -49,6 +50,25 @@ def compute_blur_score(crop_bgr: np.ndarray) -> float:
     """Return the Laplacian variance (higher = sharper)."""
     gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY)
     return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+
+def compute_blur_score_normalized(crop_bgr: np.ndarray, size: int = 128) -> float:
+    """Compute blur on a normalized square crop without altering the saved crop.
+
+    The input crop is resized to a fixed square size before measuring blur.
+    This keeps the blur threshold comparable across variable crop dimensions.
+    """
+    if crop_bgr.size == 0:
+        return 0.0
+
+    h, w = crop_bgr.shape[:2]
+    target = max(1, int(size))
+    if h == 0 or w == 0:
+        return 0.0
+
+    interp = cv2.INTER_AREA if max(h, w) > target else cv2.INTER_LINEAR
+    resized = cv2.resize(crop_bgr, (target, target), interpolation=interp)
+    return compute_blur_score(resized)
 
 
 def is_near_edge(
@@ -85,7 +105,12 @@ class VideoTracker:
         self.cfg = config if config is not None else dict(_TRACKER_DEFAULTS)
 
     # ------------------------------------------------------------------ #
-    def process_video(self, video_path: str | Path, video_id: str) -> list[dict[str, Any]]:
+    def process_video(
+        self,
+        video_path: str | Path,
+        video_id: str,
+        blur_report: bool = False,
+    ) -> list[dict[str, Any]]:
         """Run the full tracking + cropping pipeline on one video.
 
         A fresh YOLO model is instantiated each call so that ByteTrack
@@ -109,12 +134,21 @@ class VideoTracker:
         frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         sample_interval = max(1, round(fps * self.cfg["sample_interval_sec"]))
+        vid_stride = max(1, int(self.cfg.get("vid_stride", 1)))
+        blur_eval_size = max(1, int(self.cfg.get("blur_eval_size", 128)))
 
         # Per-track bookkeeping
         last_crop_frame: dict[int, int] = {}
 
-        # Reject counters
-        reject = {"low_conf": 0, "too_small": 0, "near_edge": 0, "too_blurry": 0}
+        # Attempt / rejection counters
+        stats = {
+            "attempts": 0,
+            "accepted": 0,
+            "rejected_too_small": 0,
+            "rejected_near_edge": 0,
+            "rejected_too_blurry": 0,
+        }
+        blur_scores_by_class: dict[str, list[float]] = {}
 
         # Output paths
         output_base = Path(self.cfg["output_dir"]) / video_id
@@ -124,6 +158,12 @@ class VideoTracker:
         frame_idx = 0
 
         while cap.isOpened():
+            if frame_idx % vid_stride != 0:
+                if not cap.grab():
+                    break
+                frame_idx += 1
+                continue
+
             ret, frame = cap.read()
             if not ret:
                 break
@@ -134,7 +174,6 @@ class VideoTracker:
                 classes=self.cfg["classes"],
                 tracker="bytetrack.yaml",
                 conf=self.cfg["conf_min"],
-                vid_stride=self.cfg["vid_stride"],
                 verbose=False,
             )
 
@@ -153,23 +192,20 @@ class VideoTracker:
                 bw = x2 - x1
                 bh = y2 - y1
 
-                # Filter: confidence
-                if conf < self.cfg["conf_min"]:
-                    reject["low_conf"] += 1
+                # Sampling interval: first appearance or enough time elapsed
+                if track_id in last_crop_frame and (frame_idx - last_crop_frame[track_id]) < sample_interval:
                     continue
+
+                stats["attempts"] += 1
 
                 # Filter: minimum size
                 if bw < self.cfg["min_box_w"] or bh < self.cfg["min_box_h"]:
-                    reject["too_small"] += 1
+                    stats["rejected_too_small"] += 1
                     continue
 
                 # Filter: edge proximity
                 if is_near_edge(x1, y1, x2, y2, frame_w, frame_h, self.cfg["edge_margin_px"]):
-                    reject["near_edge"] += 1
-                    continue
-
-                # Sampling interval: first appearance or enough time elapsed
-                if track_id in last_crop_frame and (frame_idx - last_crop_frame[track_id]) < sample_interval:
+                    stats["rejected_near_edge"] += 1
                     continue
 
                 # Padded crop
@@ -178,13 +214,16 @@ class VideoTracker:
                 if crop_img.size == 0:
                     continue
 
-                # Filter: blur
-                blur_var = compute_blur_score(crop_img)
-                if blur_var < self.cfg["blur_var_min"]:
-                    reject["too_blurry"] += 1
+                # Filter: blur (normalized across crop size)
+                blur_score = compute_blur_score_normalized(crop_img, blur_eval_size)
+                class_name = model.names[int(cls_id)]
+                blur_scores_by_class.setdefault(class_name, []).append(float(blur_score))
+                if blur_score < self.cfg["blur_var_min"]:
+                    stats["rejected_too_blurry"] += 1
                     continue
 
                 # ── Save crop ───────────────────────────────────────────
+                stats["accepted"] += 1
                 track_dir = output_base / str(track_id)
                 track_dir.mkdir(parents=True, exist_ok=True)
                 crop_fname = f"f{frame_idx:06d}.jpg"
@@ -199,7 +238,7 @@ class VideoTracker:
                     "frame_idx": frame_idx,
                     "timestamp_sec": round(frame_idx / fps, 4),
                     "class_id": int(cls_id),
-                    "class_name": model.names[int(cls_id)],
+                    "class_name": class_name,
                     "conf": round(float(conf), 4),
                     "bbox_xyxy": [
                         round(float(x1), 1),
@@ -210,6 +249,7 @@ class VideoTracker:
                     "frame_w": frame_w,
                     "frame_h": frame_h,
                     "fps": fps,
+                    "blur_score": round(float(blur_score), 2),
                     "crop_path": crop_rel,
                 }
                 metadata_records.append(record)
@@ -222,6 +262,24 @@ class VideoTracker:
 
         cap.release()
 
+        stats_path = output_base / "stats.json"
+        attempts = max(1, stats["attempts"])
+        stats_report = {
+            "attempts": stats["attempts"],
+            "accepted": stats["accepted"],
+            "rejected_too_small": stats["rejected_too_small"],
+            "rejected_near_edge": stats["rejected_near_edge"],
+            "rejected_too_blurry": stats["rejected_too_blurry"],
+            "percentages": {
+                "accepted": round((stats["accepted"] / attempts) * 100.0, 2),
+                "rejected_too_small": round((stats["rejected_too_small"] / attempts) * 100.0, 2),
+                "rejected_near_edge": round((stats["rejected_near_edge"] / attempts) * 100.0, 2),
+                "rejected_too_blurry": round((stats["rejected_too_blurry"] / attempts) * 100.0, 2),
+            },
+        }
+        with open(stats_path, "w") as f:
+            json.dump(stats_report, f, indent=2)
+
         # ── Write metadata.jsonl ────────────────────────────────────────
         meta_path = output_base / "metadata.jsonl"
         with open(meta_path, "w") as f:
@@ -230,10 +288,38 @@ class VideoTracker:
 
         # ── Summary log ─────────────────────────────────────────────────
         logger.info("Video '%s' complete – %d frames, %d crops saved", video_id, frame_idx, len(metadata_records))
-        for reason, count in reject.items():
+        logger.info("  attempts=%d accepted=%d", stats["attempts"], stats["accepted"])
+        for key, label in (
+            ("rejected_too_small", "too_small"),
+            ("rejected_near_edge", "near_edge"),
+            ("rejected_too_blurry", "too_blurry"),
+        ):
+            count = stats[key]
             if count:
-                logger.info("  rejected %-12s %d", reason, count)
+                pct = (count / attempts) * 100.0
+                logger.info("  rejected %-12s %d (%0.2f%%)", label, count, pct)
         logger.info("  metadata written to %s", meta_path)
+        logger.info("  stats written to %s", stats_path)
+
+        if blur_report:
+            for class_name, values in sorted(blur_scores_by_class.items()):
+                arr = np.array(values, dtype=np.float64)
+                percentiles = {
+                    "p5": float(np.percentile(arr, 5)),
+                    "p25": float(np.percentile(arr, 25)),
+                    "p50": float(np.percentile(arr, 50)),
+                    "p75": float(np.percentile(arr, 75)),
+                    "p95": float(np.percentile(arr, 95)),
+                }
+                logger.info(
+                    "  blur_report class=%s p5=%.2f p25=%.2f p50=%.2f p75=%.2f p95=%.2f",
+                    class_name,
+                    percentiles["p5"],
+                    percentiles["p25"],
+                    percentiles["p50"],
+                    percentiles["p75"],
+                    percentiles["p95"],
+                )
 
         return metadata_records
 
@@ -245,6 +331,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--video", required=True, help="Path to the input video file.")
     parser.add_argument("--video-id", required=True, help="Unique identifier for this video.")
     parser.add_argument("--config", default="configs/vision.yaml", help="Path to vision.yaml config file.")
+    parser.add_argument("--blur-report", action="store_true", help="Print blur-score percentiles by class_name after processing.")
     return parser.parse_args()
 
 
@@ -253,7 +340,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s")
     cfg = load_config(args.config)
     tracker = VideoTracker(cfg)
-    tracker.process_video(args.video, args.video_id)
+    tracker.process_video(args.video, args.video_id, blur_report=args.blur_report)
 
 
 if __name__ == "__main__":
