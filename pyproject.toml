@@ -1,0 +1,7 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+    "slow: tests that require pretrained models or heavy inference and are intended to run separately from fast checks",
+]
+addopts = "-m 'not slow'"

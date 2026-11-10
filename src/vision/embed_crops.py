@@ -118,6 +118,14 @@ def embed_video(
     # Keep only records whose images loaded successfully
     valid_records = [records[i] for i in valid_idx]
 
+    if not valid_idx:
+        logger.error(
+            "No valid crop embeddings for video '%s' from %s; skipping output files.",
+            video_id,
+            meta_path,
+        )
+        return
+
     if embeddings.shape[0] != len(valid_records):
         raise RuntimeError(
             f"Mismatch: {embeddings.shape[0]} embeddings vs {len(valid_records)} valid records"

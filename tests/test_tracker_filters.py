@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import cv2
 import numpy as np
 import pytest
 import torch
@@ -15,6 +16,7 @@ from src.vision.tracker import (
     VideoTracker,
     _TRACKER_DEFAULTS,
     compute_blur_score,
+    compute_blur_score_normalized,
     is_near_edge,
     pad_bbox,
 )
@@ -115,6 +117,12 @@ class TestBlurScore:
         img = np.full((100, 100, 3), 128, dtype=np.uint8)
         score = compute_blur_score(img)
         assert score < 1
+
+    def test_normalized_blur_score_detects_blur(self) -> None:
+        sharp = np.zeros((128, 128, 3), dtype=np.uint8)
+        sharp[::2, ::2] = 255
+        blurred = cv2.GaussianBlur(sharp, (31, 31), 0)
+        assert compute_blur_score_normalized(sharp, 128) > compute_blur_score_normalized(blurred, 128)
 
 
 # ── Integration tests via mocked tracker ─────────────────────────────────────

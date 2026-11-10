@@ -1,10 +1,15 @@
-"""Tests for CLIPEmbedder: shape, normalisation, batch consistency, long text.
+"""Slow end-to-end tests for CLIPEmbedder.
 
-These tests load the real CLIP model to verify end-to-end correctness.
-Mark them with ``pytest -m slow`` if you want to skip on CI without GPU.
+These tests load the real CLIP model and are excluded from the default fast
+suite with ``pytest -m "not slow"``. Run them explicitly with
+``pytest -m slow`` when a pretrained model is available.
 """
 
 from __future__ import annotations
+
+import pytest
+
+pytestmark = pytest.mark.slow
 
 import tempfile
 from pathlib import Path
@@ -71,6 +76,21 @@ class TestEmbedImages:
     def test_empty_input(self, embedder: CLIPEmbedder) -> None:
         result = embedder.embed_images([])
         assert result.shape == (0, embedder.dim)
+
+    def test_embed_images_with_indices_handles_invalid_paths(self, embedder: CLIPEmbedder, tmp_path: Path) -> None:
+        good_head = tmp_path / "head.jpg"
+        good_mid = tmp_path / "mid.jpg"
+        good_tail = tmp_path / "tail.jpg"
+        for path, color in [(good_head, (10, 20, 30)), (good_mid, (20, 30, 40)), (good_tail, (30, 40, 50))]:
+            Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8) + np.array(color, dtype=np.uint8)).save(path)
+
+        bad = tmp_path / "bad.jpg"
+        bad.write_text("not an image")
+
+        paths = [bad, good_head, good_mid, bad, good_tail]
+        embeddings, valid_idx = embedder.embed_images_with_indices(paths)
+        assert valid_idx == [1, 2, 4]
+        assert embeddings.shape == (3, embedder.dim)
 
 @pytest.mark.slow
 class TestEmbedText:
