@@ -52,12 +52,12 @@ code docker/docker-compose.yml
 version: '3.8'
 services:
   db:
-    image: ankane/pgvector:latest
+    image: pgvector/pgvector:0.8.0-pg17-bookworm
     container_name: video_rag_db
     restart: always
     environment:
-      POSTGRES_USER: root
-      POSTGRES_PASSWORD: password123
+      POSTGRES_USER: <user>
+      POSTGRES_PASSWORD: <POSTGRES_PASSWORD>
       POSTGRES_DB: videorag
     ports:
       - "5432:5432"
@@ -124,37 +124,36 @@ import cv2
 import os
 from ultralytics import YOLO
 
-def process_video(video_path, output_dir, sample_rate=15):
-    """Đọc video, tracking đối tượng và cắt ảnh lưu ra file theo sample_rate"""
+def process_video(video_path, output_dir, sample_rate=0.6):
+    """Legacy reference only. The current project uses normalized blur filtering and structured metadata."""
     os.makedirs(output_dir, exist_ok=True)
     model = YOLO('data/yolov10s.pt')
     cap = cv2.VideoCapture(video_path)
-    
+
     frame_idx = 0
-    last_crop_frame = {} 
+    last_crop_frame = {}
 
     while cap.isOpened():
         ret, frame = cap.read()
-        if not ret: break
-        
-        # Gọi thuật toán ByteTrack nhận diện Người(0) và Xe Cộ(2)
-        results = model.track(frame, persist=True, classes=[0, 2], tracker="bytetrack.yaml", verbose=False)
-        
+        if not ret:
+            break
+
+        results = model.track(frame, persist=True, classes=[0, 1, 2, 3, 5, 7], tracker="bytetrack.yaml", verbose=False)
+
         if results[0].boxes.id is not None:
             boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
             track_ids = results[0].boxes.id.cpu().numpy().astype(int)
-            
+
             for box, track_id in zip(boxes, track_ids):
-                # Logic lấy mẫu động: Cắt ảnh nếu ID này xuất hiện lần đầu, hoặc đã vượt quá sample_rate
-                if track_id is not None and (track_id not in last_crop_frame or frame_idx - last_crop_frame[track_id] >= sample_rate):
+                if track_id is not None and (track_id not in last_crop_frame or frame_idx - last_crop_frame[track_id] >= max(1, round(10 * sample_rate))):
                     x1, y1, x2, y2 = box
                     y1, y2 = max(0, y1), min(frame.shape[0], y2)
                     x1, x2 = max(0, x1), min(frame.shape[1], x2)
-                    
+
                     crop_img = frame[y1:y2, x1:x2]
-                    
+
                     if crop_img.size > 0:
-                        crop_filename = f"{output_dir}/id_{track_id}_frame_{frame_idx}.jpg"
+                        crop_filename = f"{output_dir}/track_{track_id}_frame_{frame_idx}.jpg"
                         cv2.imwrite(crop_filename, crop_img)
                         print(f"[Lưu] ID: {track_id} | Frame: {frame_idx} | File: {crop_filename}")
                         last_crop_frame[track_id] = frame_idx
@@ -163,7 +162,7 @@ def process_video(video_path, output_dir, sample_rate=15):
     print("Hoàn tất xử lý video.")
 
 if __name__ == "__main__":
-    process_video("data/raw_videos/test_video.mp4", "data/crops", sample_rate=15)
+    process_video("data/raw_videos/test_video.mp4", "data/crops", sample_rate=0.6)
 ```
 
 **Cách chạy kiểm thử và Kết quả thực tế:**
